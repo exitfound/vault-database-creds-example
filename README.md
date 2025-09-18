@@ -6,9 +6,65 @@
 
 ## Подготовка к запуску:
 
-Минимальный набор действий, необходимый для запуска примера:
+### 1. Настройка PostgreSQL
 
+Запустите PostgreSQL в Docker для простоты настройки:
+
+```bash
+docker run --name postgres-vault \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_DB=postgres \
+  -p 5432:5432 \
+  -d postgres:16
 ```
+
+### 2. Настройка динамических credentials
+
+Включите Database Secrets Engine и настройте подключение к PostgreSQL:
+
+```bash
+# Включить Database Secrets Engine
+vault secrets enable database
+
+# Настроить подключение к PostgreSQL
+vault write database/config/my-postgresql-database \
+    plugin_name=postgresql-database-plugin \
+    connection_url="postgresql://{{username}}:{{password}}@localhost:5432/postgres?sslmode=disable" \
+    allowed_roles="postgresql-role" \
+    username="postgres" \
+    password="postgres"
+
+# Создать роль для динамических credentials (TTL = 1 минута для демонстрации)
+vault write database/roles/postgresql-role \
+    db_name=my-postgresql-database \
+    creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; \
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+    default_ttl="1m" \
+    max_ttl="2m"
+```
+
+### 3. Настройка статических credentials (опционально)
+
+Если хотите также протестировать статические credentials, создайте отдельную роль:
+
+```bash
+# Сначала создайте статического пользователя в PostgreSQL
+docker exec -it postgres-vault psql -U postgres -c "CREATE USER static_user WITH PASSWORD 'static_pass';"
+docker exec -it postgres-vault psql -U postgres -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO static_user;"
+
+# Создать роль для статических credentials в Vault
+vault write database/static-roles/postgresql-role \
+    db_name=my-postgresql-database \
+    username="static_user" \
+    rotation_period="1m"
+```
+
+### 4. Запуск примера
+
+Минимальный набор действий для запуска:
+
+```bash
 git clone https://github.com/exitfound/vault-database-creds-example.git
 pip3 install -r requirements.txt
 python3 example.py
@@ -38,15 +94,13 @@ python3 example.py
 
 - Тип учетных данных (Dynamic или Static Creds), поскольку скрипт поддерживает оба варианта. По умолчанию это creds, то бишь динамический вариант;
 
-- Непосредственно само имя роли, которая была создана во время настройки Vault для интеграции с БД Postgresql. По умолчанию это postgresql-role;
+- Непосредственно сама роль, которая была создана во время настройки Vault для интеграции с БД Postgresql. По умолчанию это postgresql-role;
 
 По сути это аналог двух консольных команд в Vault:
 
 ```
 vault read database/creds/postgresql-role - для получения динамических учетных данных;
-```
 
-```
 vault read database/static-creds/postgresql-role - для получения статических учетных данных;
 ```
 
@@ -60,16 +114,18 @@ Ctrl + C
 
 Если вы хотите в явном виде увидеть как приложение потеряет доступ к базе из-за того, что пароль протух, а потом вновь обратится к Vault за обновленным вариантом, и снова подключится к базе, вы можете выставить крайне низкий TTL при настройке Vault и просто подождать или использовать следующие команды в соседнем окне во время работы скрипта:
 
-```
-vault lease revoke -prefix database/creds/postgresql-role - условный rotate для динамических учетных данных;
+### Ручной сброс динамических credentials
+
+```bash
+# Отозвать все текущие динамические credentials для моментального тестирования ротации
+vault lease revoke -prefix database/creds/postgresql-role
 ```
 
-```
-vault write -f database/rotate-role/postgresql-role - rotate для статических учетных данных;
+### Ручной сброс статических credentials
+
+```bash
+# Rotate статических учетных данных
+vault write -f database/rotate-role/postgresql-role
 ```
 
 Подробнее обо всех командах по работе с динамическими / статическими учетными данными в рамках работы с БД можно найти в статье по ссылкам выше.
-
-## Важное замечание:
-
-В скрипте я постарался обработать хотя бы какие-то базовые ошибки в виде исключений, которые могут возникнуть. Однако в случае с psycopg возникла проблема в том плане, что в их официальной документации нет адекватной обработки на тот случай, когда у нас endpoint БД недоступен. Из-за этого (как костыль) пришлось ошибку конвертировать в строку и по ней уже что-то определять. Поэтому если вы укажите базу, у которой нет связи с Vault, но которая при этом является доступной, цикл будет отрабатывать одновременно с сообщением об ошибке, и с тем, что данные от Vault успешно были обновлены. Этот казус я устранить не смог. Причем схожую проблему я находил и у других людей. Не то чтобы это критично и при валидности узлов это никак не повлияет на демонстрацию как такого, но предупредить вас мне всё же хотелось бы. Такие дела.
